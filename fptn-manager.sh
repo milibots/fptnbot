@@ -139,8 +139,8 @@ ensure_python() {
         esac
     fi
     info "Installing Python bot dependencies..."
-    pip3 install -q python-telegram-bot==20.7 aiofiles 2>/dev/null || \
-    pip3 install -q --break-system-packages python-telegram-bot==20.7 aiofiles 2>/dev/null || true
+    pip3 install -q "python-telegram-bot[job-queue]==20.7" aiofiles 2>/dev/null || \
+    pip3 install -q --break-system-packages "python-telegram-bot[job-queue]==20.7" aiofiles 2>/dev/null || true
     success "Python dependencies installed."
 }
 
