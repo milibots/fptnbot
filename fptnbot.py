@@ -586,18 +586,21 @@ def main():
         states={AWAIT_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_username)],
                 AWAIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_password)],
                 AWAIT_BW:       [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_bw)]},
-        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")], allow_reentry=True)
+        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")],
+        allow_reentry=True, per_message=False)
 
     del_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_admin_del,   pattern="^admin_del$")],
         states={AWAIT_DEL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_del_user)]},
-        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")], allow_reentry=True)
+        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")],
+        allow_reentry=True, per_message=False)
 
     token_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(cb_admin_token, pattern="^admin_token$")],
         states={AWAIT_TOKEN_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_token_user)],
                 AWAIT_TOKEN_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, recv_token_pass)]},
-        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")], allow_reentry=True)
+        fallbacks=[CallbackQueryHandler(cb_cancel, pattern="^cancel$")],
+        allow_reentry=True, per_message=False)
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("status", show_status))
@@ -606,7 +609,11 @@ def main():
     app.add_handler(del_conv)
     app.add_handler(token_conv)
     app.add_handler(CallbackQueryHandler(cb_router))
-    app.job_queue.run_repeating(periodic_usage_sync, interval=300, first=30)
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(periodic_usage_sync, interval=300, first=30)
+        log.info("Usage sync job scheduled every 5 minutes.")
+    else:
+        log.warning("JobQueue not available — usage syncs on-demand only.")
 
     log.info("Bot polling started.")
     app.run_polling(drop_pending_updates=True)
