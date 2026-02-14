@@ -1,213 +1,220 @@
 #!/usr/bin/env bash
-# =============================================================================
-# fptn-manager — FPTN VPN Server Manager
-# Repository: https://github.com/FarazFe/fptn-manager
-# =============================================================================
+# shellcheck disable=SC2016,SC2005,SC2034,SC1091
 set -Eeuo pipefail
 
-# =============================================================================
-# Constants
-# =============================================================================
-readonly APP_NAME="fptn-manager"
-readonly BIN_PATH="/usr/local/bin/${APP_NAME}"
-readonly CFG_DIR="/etc/fptn"
-readonly CFG_FILE="${CFG_DIR}/manager.conf"
-readonly RAW_INSTALL_URL="https://raw.githubusercontent.com/FarazFe/fptn-manager/main/fptn-manager.sh"
+# ==========================================================
+# FPTN Manager - Telegram Bot Edition
+# ==========================================================
+# This script installs the FPTN VPN server and a Telegram 
+# Admin Bot to manage it completely via GUI.
+# ==========================================================
 
-# =============================================================================
+APP_NAME="fptn-manager"
+BIN_PATH="/usr/local/bin/${APP_NAME}"
+CFG_DIR="/etc/fptn"
+CFG_FILE="${CFG_DIR}/manager.conf"
+BOT_DIR="/opt/fptn-bot"
+BOT_FILE="${BOT_DIR}/fptn_bot.py"
+BOT_SERVICE="/etc/systemd/system/fptn-bot.service"
+RAW_INSTALL_URL="https://raw.githubusercontent.com/FarazFe/fptn-manager/main/fptn-manager.sh"
+
+# -------------------------
+# Colors & UI
+# -------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# -------------------------
 # Defaults
-# =============================================================================
-readonly DEFAULT_INSTALL_DIR="/opt/fptn"
-readonly DEFAULT_FPTN_PORT="443"
-readonly DEFAULT_PROXY_DOMAIN="cdnvideo.com"
-readonly DEFAULT_ENABLE_DETECT_PROBING="true"
-readonly DEFAULT_DISABLE_BITTORRENT="true"
-readonly DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER="3"
-readonly DEFAULT_DNS_IPV4_PRIMARY="8.8.8.8"
-readonly DEFAULT_DNS_IPV4_SECONDARY="8.8.4.4"
-readonly DEFAULT_DNS_IPV6_PRIMARY="2001:4860:4860::8888"
-readonly DEFAULT_DNS_IPV6_SECONDARY="2001:4860:4860::8844"
-readonly DEFAULT_BANDWIDTH_MBPS="100"
-readonly DEFAULT_EASY_USERNAME_PREFIX="fptn"
+# -------------------------
+DEFAULT_INSTALL_DIR="/opt/fptn"
+DEFAULT_FPTN_PORT="443"
+DEFAULT_PROXY_DOMAIN="cdnvideo.com"
+DEFAULT_ENABLE_DETECT_PROBING="true"
+DEFAULT_DISABLE_BITTORRENT="true"
+DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER="3"
+DEFAULT_DNS_IPV4_PRIMARY="8.8.8.8"
+DEFAULT_DNS_IPV4_SECONDARY="8.8.4.4"
+DEFAULT_DNS_IPV6_PRIMARY="2001:4860:4860::8888"
+DEFAULT_DNS_IPV6_SECONDARY="2001:4860:4860::8844"
+DEFAULT_BANDWIDTH_MBPS="100"
 
-# =============================================================================
-# Utility helpers
-# =============================================================================
-
-# Check if a command exists
+# -------------------------
+# Helpers
+# -------------------------
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# Die with an error message
-die() { echo "ERROR: $*" >&2; exit 1; }
-
-# Abort unless running as root
 require_root() {
-    [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Please run as root (sudo)."
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo -e "${RED}ERROR: Please run as root (sudo).${NC}" >&2
+    exit 1
+  fi
 }
 
-# Detect the system package manager
+print_banner() {
+  clear
+  echo -e "${PURPLE}"
+  echo "╔════════════════════════════════════════════════════════╗"
+  echo "║                                                        ║"
+  echo "║          ███████╗████████╗ █████╗ ██████╗              ║"
+  echo "║          ██╔════╝╚══██╔══╝██╔══██╗██╔══██╗             ║"
+  echo "║          █████╗     ██║   ███████║██████╔╝             ║"
+  echo "║          ██╔══╝     ██║   ██╔══██║██╔══██╗             ║"
+  echo "║          ██║        ██║   ██║  ██║██║  ██║             ║"
+  echo "║          ╚═╝        ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝             ║"
+  echo "║                                                        ║"
+  echo "║        FPTN Manager - Telegram Bot Edition             ║"
+  echo "╚════════════════════════════════════════════════════════╝"
+  echo -e "${NC}"
+}
+
+msg_info()  { echo -e "${CYAN}[INFO]${NC} $1"; }
+msg_ok()    { echo -e "${GREEN}[ OK ]${NC} $1"; }
+msg_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+msg_err()   { echo -e "${RED}[ERR!]${NC} $1"; }
+
 detect_pkg_mgr() {
-    if   has_cmd apt-get; then echo "apt"
-    elif has_cmd dnf;     then echo "dnf"
-    elif has_cmd yum;     then echo "yum"
-    else                       echo "unknown"
-    fi
+  if has_cmd apt-get; then echo "apt"
+  elif has_cmd dnf; then echo "dnf"
+  elif has_cmd yum; then echo "yum"
+  else echo "unknown"
+  fi
 }
-
-# Prompt with a labelled default; echo the chosen value
-prompt_default() {
-    local label="$1" def="$2" ans
-    read -r -p "${label} [${def}]: " ans
-    echo "${ans:-$def}"
-}
-
-# Write text to a file, creating parent dirs as needed
-write_file() {
-    local path="$1" content="$2"
-    mkdir -p "$(dirname "$path")"
-    printf "%s\n" "$content" > "$path"
-}
-
-# Read a secret from /dev/tty (no echo)
-read_secret_tty() {
-    local prompt="$1" var
-    IFS= read -r -s -p "$prompt" var < /dev/tty
-    printf "%s" "$var"
-}
-
-# Build a timestamped easy username
-easy_username() {
-    printf "%s%s" "$DEFAULT_EASY_USERNAME_PREFIX" "$(date +%H%M%S)"
-}
-
-# Run a command with a timeout (uses system `timeout` or a background-job fallback)
-run_with_timeout() {
-    local seconds="$1"; shift
-    if has_cmd timeout; then
-        timeout "$seconds" "$@"
-    else
-        local pid killer rc=0
-        ("$@") & pid=$!
-        ( sleep "$seconds"; kill -TERM "$pid" 2>/dev/null || true ) & killer=$!
-        wait "$pid" || rc=$?
-        kill "$killer" 2>/dev/null || true
-        return "$rc"
-    fi
-}
-
-# =============================================================================
-# Dependency installation
-# =============================================================================
 
 ensure_curl() {
-    has_cmd curl && return
-    local pm; pm="$(detect_pkg_mgr)"
-    echo "[*] Installing curl..."
-    case "$pm" in
-        apt) apt-get update -y && apt-get install -y curl ;;
-        dnf) dnf install -y curl ;;
-        yum) yum install -y curl ;;
-        *)   die "curl not available and package manager is unsupported." ;;
-    esac
+  has_cmd curl && return
+  local pm; pm="$(detect_pkg_mgr)"
+  msg_info "Installing curl..."
+  case "$pm" in
+    apt) apt-get update -y && apt-get install -y curl ;;
+    dnf) dnf install -y curl ;;
+    yum) yum install -y curl ;;
+    *) msg_err "curl not available and package manager unsupported."; exit 1 ;;
+  esac
+}
+
+start_enable_docker() {
+  systemctl enable --now docker >/dev/null 2>&1 || service docker start || true
 }
 
 ensure_docker() {
-    has_cmd docker && return
-    echo "[*] Installing Docker..."
-    ensure_curl
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable --now docker >/dev/null 2>&1 || service docker start || true
+  if has_cmd docker; then
+      msg_ok "Docker already installed."
+      return
+  fi
+  msg_info "Installing Docker..."
+  ensure_curl
+  curl -fsSL https://get.docker.com | sh
+  start_enable_docker
+  msg_ok "Docker installed successfully."
 }
 
 ensure_compose() {
-    docker compose version >/dev/null 2>&1 && return
-    echo "[*] Installing Docker Compose v2..."
-    local pm; pm="$(detect_pkg_mgr)"
-    case "$pm" in
-        apt)       apt-get update -y && apt-get install -y docker-compose-plugin ;;
-        dnf | yum) "$pm" install -y docker-compose-plugin ;;
-        *)         die "Docker Compose v2 not available for this package manager." ;;
-    esac
+  if docker compose version >/dev/null 2>&1; then
+      return
+  fi
+  msg_info "Installing Docker Compose v2..."
+  local pm; pm="$(detect_pkg_mgr)"
+  case "$pm" in
+    apt) apt-get update -y && apt-get install -y docker-compose-plugin ;;
+    dnf|yum) $pm install -y docker-compose-plugin ;;
+    *) msg_err "Docker Compose v2 not available."; exit 1 ;;
+  esac
 }
 
-# Ensure root + Docker + Compose are all present
 ensure_docker_stack() {
-    require_root
-    ensure_docker
-    ensure_compose
+  require_root
+  ensure_docker
+  ensure_compose
 }
 
-# =============================================================================
-# Config / install-dir management
-# =============================================================================
+ensure_python_venv() {
+    local pm; pm="$(detect_pkg_mgr)"
+    msg_info "Ensuring Python3 and Venv are available..."
+    case "$pm" in
+        apt) apt-get update -qq && apt-get install -y python3 python3-venv python3-pip ;;
+        dnf|yum) $pm install -y python3 python3-virtualenv ;;
+        *) msg_err "Could not install Python venv." && exit 1 ;;
+    esac
+    msg_ok "Python environment ready."
+}
+
+fetch_public_ip() {
+  ensure_curl
+  curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null | tr -d ' \r\n' || true
+}
+
+write_file() {
+  local path="$1" content="$2"
+  mkdir -p "$(dirname "$path")"
+  printf "%s\n" "$content" > "$path"
+}
 
 save_manager_config() {
-    mkdir -p "$CFG_DIR"
-    write_file "$CFG_FILE" "$1"
+  mkdir -p "$CFG_DIR"
+  write_file "$CFG_FILE" "$1"
 }
 
 load_install_dir() {
-    if [[ -f "$CFG_FILE" ]]; then
-        local d
-        d="$(tr -d '\r\n' < "$CFG_FILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-        [[ -n "$d" ]] && echo "$d" && return
+  if [ -f "$CFG_FILE" ]; then
+    local d
+    d="$(tr -d '\r\n' <"$CFG_FILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -n "$d" ]; then
+      echo "$d"
+      return 0
     fi
-    echo "$DEFAULT_INSTALL_DIR"
+  fi
+  echo "$DEFAULT_INSTALL_DIR"
 }
 
-# Run `docker compose` inside the install directory
 dc() {
-    local dir; dir="$(load_install_dir)"
-    (cd "$dir" && docker compose "$@")
+  local dir; dir="$(load_install_dir)"
+  (cd "$dir" && docker compose "$@")
 }
 
-# Abort if no docker-compose.yml is found in the install directory
 need_install_dir() {
-    local dir; dir="$(load_install_dir)"
-    [[ -f "${dir}/docker-compose.yml" ]] || die "Not installed yet. Run an install first."
-}
-
-# Read a single variable from the .env file
-env_get() {
-    local key="$1"
-    local envfile; envfile="$(load_install_dir)/.env"
-    [[ -f "$envfile" ]] || return 1
-    awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/,""); print; exit }' "$envfile"
-}
-
-# Fetch the server's public IP via several fallback services
-fetch_public_ip() {
-    local services=(
-        "https://api.ipify.org"
-        "https://ifconfig.me/ip"
-        "https://icanhazip.com"
-    )
-    for svc in "${services[@]}"; do
-        local ip
-        ip="$(curl -fsSL --max-time 5 "$svc" 2>/dev/null | tr -d ' \r\n')" && {
-            echo "$ip"; return 0
-        }
-    done
+  local dir; dir="$(load_install_dir)"
+  if [ ! -f "${dir}/docker-compose.yml" ]; then
+    msg_err "Not installed yet. Run install first."
     return 1
+  fi
+  return 0
 }
 
-# Poll until the fptn-server container is accepting exec commands (up to 90 s)
 wait_for_container_ready() {
-    local i
-    for i in $(seq 1 90); do
-        dc exec -T fptn-server sh -c "true" >/dev/null 2>&1 && return 0
-        sleep 1
-    done
-    die "fptn-server did not become ready within 90 seconds."
+  local i
+  msg_info "Waiting for fptn-server container to start..."
+  for i in $(seq 1 60); do
+    if dc exec -T fptn-server sh -c "true" >/dev/null 2>&1; then
+      msg_ok "Container is ready."
+      return 0
+    fi
+    sleep 2
+  done
+  msg_err "fptn-server did not become ready in time."
+  return 1
 }
 
-# =============================================================================
-# Compose / env file writers
-# =============================================================================
+env_get() {
+  local key="$1"
+  local dir; dir="$(load_install_dir)"
+  local envfile="${dir}/.env"
+  [ -f "$envfile" ] || return 1
+  awk -F= -v k="$key" '$1==k {sub(/^[^=]*=/,""); print; exit}' "$envfile"
+}
 
+# -------------------------
+# Compose + Env
+# -------------------------
 write_compose() {
-    local dir="$1"
-    cat > "${dir}/docker-compose.yml" <<'YAML'
+  local dir="$1"
+  cat > "${dir}/docker-compose.yml" <<'YAML'
 services:
   fptn-server:
     restart: unless-stopped
@@ -263,19 +270,19 @@ YAML
 }
 
 write_env() {
-    local dir="$1"
-    local fptn_port="$2"
-    local server_external_ips="$3"
-    local proxy_domain="$4"
-    local detect_probing="$5"
-    local disable_bt="$6"
-    local max_sessions="$7"
-    local dns4_1="$8"
-    local dns4_2="$9"
-    local dns6_1="${10}"
-    local dns6_2="${11}"
+  local dir="$1"
+  local fptn_port="$2"
+  local server_external_ips="$3"
+  local proxy_domain="$4"
+  local detect_probing="$5"
+  local disable_bt="$6"
+  local max_sessions="$7"
+  local dns4_1="$8"
+  local dns4_2="$9"
+  local dns6_1="${10}"
+  local dns6_2="${11}"
 
-    write_file "${dir}/.env" \
+  write_file "$dir/.env" \
 "FPTN_PORT=${fptn_port}
 SERVER_EXTERNAL_IPS=${server_external_ips}
 ENABLE_DETECT_PROBING=${detect_probing}
@@ -290,117 +297,390 @@ MAX_ACTIVE_SESSIONS_PER_USER=${max_sessions}
 DNS_IPV4_PRIMARY=${dns4_1}
 DNS_IPV4_SECONDARY=${dns4_2}
 DNS_IPV6_PRIMARY=${dns6_1}
-DNS_IPV6_SECONDARY=${dns6_2}"
+DNS_IPV6_SECONDARY=${dns6_2}
+"
 }
 
-# =============================================================================
-# SSL helpers
-# =============================================================================
+# -------------------------
+# Bot Installation
+# -------------------------
 
-ssl_gen_if_missing() {
+install_bot_dependencies() {
+    msg_info "Setting up Python Virtual Environment..."
+    mkdir -p "$BOT_DIR"
+    
+    # Create venv
+    python3 -m venv "${BOT_DIR}/venv"
+    
+    # Install libraries
+    source "${BOT_DIR}/venv/bin/activate"
+    pip install --upgrade pip
+    pip install pyTelegramBotAPI schedule
+    deactivate
+    msg_ok "Virtual environment ready."
+}
+
+write_bot_script() {
+    local BOT_TOKEN="$1"
+    local ADMIN_ID="$2"
+    local INSTALL_DIR="$3"
+    local PUBLIC_IP="$4"
+    local PORT="$5"
+
+    msg_info "Writing FPTN Bot Script..."
+    cat > "$BOT_FILE" << PYTHON_EOF
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import sqlite3
+import time
+import datetime
+import random
+import string
+import telebot
+import schedule
+import threading
+from telebot import types
+
+# Configuration
+BOT_TOKEN = "${BOT_TOKEN}"
+ADMIN_ID = ${ADMIN_ID}
+INSTALL_DIR = "${INSTALL_DIR}"
+SERVER_IP = "${PUBLIC_IP}"
+SERVER_PORT = "${SERVER_PORT}"
+DB_PATH = os.path.join(INSTALL_DIR, "users.db")
+COMPOSE_CMD = f"docker compose -f {INSTALL_DIR}/docker-compose.yml"
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Database Setup
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (username TEXT PRIMARY KEY, 
+                  password TEXT,
+                  expiry_date TEXT,
+                  traffic_limit_mb INTEGER,
+                  used_traffic_mb INTEGER DEFAULT 0,
+                  active INTEGER DEFAULT 1)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Helpers
+def gen_pass(length=10):
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+def run_cmd(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out"
+    except subprocess.CalledProcessError as e:
+        return f"Error: {e.output}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def docker_exec(cmd):
+    # Run command inside docker container
+    # Example: docker exec -i container_name cmd
+    return run_cmd(f"docker exec -i fptn-server {cmd}")
+
+def add_user_docker(username, password):
+    # Note: fptn-passwd might be interactive. 
+    # Assuming it accepts input like: fptn-passwd --add-user user --password pass
+    # Or piping: echo -e "pass\\npass" | fptn-passwd --add-user user
+    # Adjusting for standard interaction simulation:
+    cmd = f'docker exec -i fptn-server sh -c "echo -e \\"{password}\\n{password}\\" | fptn-passwd --add-user {username}"'
+    return run_cmd(cmd)
+
+def del_user_docker(username):
+    # Assuming 'y' for confirmation
+    cmd = f'docker exec -i fptn-server sh -c "echo y | fptn-passwd --del-user {username}"'
+    return run_cmd(cmd)
+
+def get_token(username, password):
+    # Generate token using the container utility
+    cmd = f'docker exec -i fptn-server token-generator --user {username} --password {password} --server-ip {SERVER_IP} --port {SERVER_PORT}'
+    out = run_cmd(cmd)
+    # Extract token (assuming it returns just the token or line starting with fptn:)
+    for line in out.splitlines():
+        if line.startswith("fptn:"):
+            return line.strip()
+    return out.strip() # Fallback
+
+# Scheduler / Expiry Checker
+def check_expirations():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.datetime.now()
+    
+    # Find expired users
+    c.execute("SELECT username FROM users WHERE active=1 AND expiry_date < ?", (now.isoformat(),))
+    expired = c.fetchall()
+    
+    for (user,) in expired:
+        print(f"User {user} expired. Disabling...")
+        # Delete from docker
+        del_user_docker(user)
+        # Update DB
+        c.execute("UPDATE users SET active=0 WHERE username=?", (user,))
+    
+    conn.commit()
+    conn.close()
+
+def scheduler_thread():
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+schedule.every(5).minutes.do(check_expirations)
+threading.Thread(target=scheduler_thread, daemon=True).start()
+
+# Bot Handlers
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔ Unauthorized")
+        return
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_users = types.InlineKeyboardButton("👥 All Users", callback_data="list_users")
+    btn_add = types.InlineKeyboardButton("➕ Create User", callback_data="add_user_start")
+    markup.row(btn_users, btn_add)
+    
+    bot.reply_to(message, "🔧 <b>FPTN Admin Panel</b>\n\nSelect an action:", parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    data = call.data
+    
+    if data == "list_users":
+        list_users(call.message, edit=True)
+    elif data == "add_user_start":
+        msg = bot.send_message(call.message.chat.id, "🆔 Send the username (or type 'auto' for random):")
+        bot.register_next_step_handler(msg, process_username_step)
+    elif data.startswith("del_"):
+        username = data.split("_")[1]
+        remove_user(username, call.message)
+    elif data.startswith("renew_"):
+        username = data.split("_")[1]
+        msg = bot.send_message(call.message.chat.id, f"📅 Send days to extend for {username}:")
+        bot.register_next_step_handler(msg, process_renew_step, username)
+    elif data.startswith("get_token_"):
+        username = data.split("_")[1]
+        send_token_info(username, call.message)
+
+def process_username_step(message):
+    username = message.text
+    if username == "auto":
+        username = "user_" + gen_pass(4)
+    
+    msg = bot.send_message(message.chat.id, "📅 Send expiry days (e.g., 30):")
+    bot.register_next_step_handler(msg, process_days_step, username)
+
+def process_days_step(message, username):
+    try:
+        days = int(message.text)
+        msg = bot.send_message(message.chat.id, "💾 Send traffic limit in MB (0 for unlimited):")
+        bot.register_next_step_handler(msg, process_traffic_step, username, days)
+    except ValueError:
+        bot.reply_to(message, "Invalid number.")
+
+def process_traffic_step(message, username, days):
+    try:
+        traffic = int(message.text)
+        create_user(username, days, traffic, message)
+    except ValueError:
+        bot.reply_to(message, "Invalid number.")
+
+def create_user(username, days, traffic, message):
+    password = gen_pass(12)
+    expiry = datetime.datetime.now() + datetime.timedelta(days=days)
+    
+    # Add to Docker
+    result = add_user_docker(username, password)
+    if "Error" in result:
+        bot.reply_to(message, f"Failed to add user to server:\n{result}")
+        return
+
+    # Add to DB
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO users VALUES (?,?,?,?,?,?)", 
+              (username, password, expiry.isoformat(), traffic, 0, 1))
+    conn.commit()
+    conn.close()
+
+    token = get_token(username, password)
+    
+    text = (
+        f"✅ <b>User Created</b>\n\n"
+        f"👤 User: {username}\n"
+        f"🔑 Pass: {password}\n"
+        f"📅 Expiry: {expiry.strftime('%Y-%m-%d')} ({days} days)\n"
+        f"💾 Traffic: {traffic} MB\n\n"
+        f"🎫 <code>{token}</code>"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+def list_users(message, edit=False):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT username, expiry_date, active FROM users")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        text = "No users found."
+    else:
+        text = "👥 <b>User List:</b>\n\n"
+        for u, exp, act in rows:
+            status = "🟢" if act else "🔴"
+            exp_date = datetime.datetime.fromisoformat(exp).strftime('%Y-%m-%d')
+            text += f"{status} <b>{u}</b> - Exp: {exp_date}\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_back = types.InlineKeyboardButton("🔙 Back", callback_data="start_back")
+    markup.add(btn_back)
+    
+    if edit:
+        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode="HTML", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+
+def send_token_info(username, message):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT password FROM users WHERE username=?", (username,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        token = get_token(username, row[0])
+        bot.send_message(message.chat.id, f"🎫 Token for {username}:\n\n<code>{token}</code>", parse_mode="HTML")
+    else:
+        bot.send_message(message.chat.id, "User not found locally.")
+
+def remove_user(username, message):
+    # Docker
+    del_user_docker(username)
+    # DB
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE username=?", (username,))
+    conn.commit()
+    conn.close()
+    bot.edit_message_text(f"🗑 User {username} deleted.", message.chat.id, message.message_id)
+
+def process_renew_step(message, username):
+    try:
+        days = int(message.text)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT expiry_date, active FROM users WHERE username=?", (username,))
+        row = c.fetchone()
+        
+        if row:
+            old_exp = datetime.datetime.fromisoformat(row[0])
+            if old_exp < datetime.datetime.now():
+                old_exp = datetime.datetime.now()
+            new_exp = old_exp + datetime.timedelta(days=days)
+            
+            c.execute("UPDATE users SET expiry_date=?, active=1 WHERE username=?", (new_exp.isoformat(), username))
+            conn.commit()
+            
+            # If was inactive, recreate in docker
+            if row[1] == 0:
+                c.execute("SELECT password FROM users WHERE username=?", (username,))
+                pw = c.fetchone()[0]
+                add_user_docker(username, pw)
+                
+            bot.reply_to(message, f"✅ Renewed {username} for {days} days. New Expiry: {new_exp.strftime('%Y-%m-%d')}")
+        else:
+            bot.reply_to(message, "User not found.")
+        conn.close()
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+# Inline buttons for specific user management
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    # This handles the 'Start' implicitly if not command
+    if message.from_user.id == ADMIN_ID:
+        send_welcome(message)
+
+print("Bot started...")
+bot.infinity_polling()
+PYTHON_EOF
+
+    chmod +x "$BOT_FILE"
+    msg_ok "Bot script created at $BOT_FILE"
+}
+
+create_systemd_service() {
+    msg_info "Creating Systemd Service..."
+    cat > "$BOT_SERVICE" << EOF
+[Unit]
+Description=FPTN Telegram Bot
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=${BOT_DIR}/venv/bin/python3 ${BOT_FILE}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable fptn-bot >/dev/null 2>&1
+    systemctl restart fptn-bot
+    msg_ok "FPTN Bot Service started."
+}
+
+# -------------------------
+# Main Install Flow
+# -------------------------
+do_install() {
+    print_banner
     ensure_docker_stack
-    need_install_dir
-    local dir; dir="$(load_install_dir)"
-    mkdir -p "${dir}/fptn-server-data"
+    ensure_python_venv
 
-    if [[ -f "${dir}/fptn-server-data/server.key" && \
-          -f "${dir}/fptn-server-data/server.crt" ]]; then
-        echo "[*] SSL certificates already exist — skipping generation."
-        return 0
+    local dir fptn_port server_ip
+    dir="$DEFAULT_INSTALL_DIR"
+    fptn_port="$DEFAULT_FPTN_PORT"
+    
+    echo -e "${CYAN}"
+    read -r -p "Enter VPN Port [443]: " fptn_port_input
+    echo -e "${NC}"
+    fptn_port="${fptn_port_input:-$DEFAULT_FPTN_PORT}"
+
+    server_ip="$(fetch_public_ip || true)"
+    if [ -z "$server_ip" ]; then
+        echo -e "${CYAN}"
+        read -r -p "Could not auto-detect IP. Enter Server Public IP: " server_ip
+        echo -e "${NC}"
     fi
 
-    echo "[*] Generating self-signed SSL certificates..."
-    dc run --rm fptn-server sh -c "cd /etc/fptn && openssl genrsa -out server.key 2048"
-    dc run --rm fptn-server sh -c \
-        "cd /etc/fptn && openssl req -new -x509 -key server.key -out server.crt -days 365 -subj '/CN=fptn'"
-    echo "[+] SSL certificates generated."
-}
-
-ssl_fingerprint() {
-    ensure_docker_stack
-    need_install_dir
-    dc run --rm fptn-server sh -c \
-        "openssl x509 -noout -fingerprint -md5 -in /etc/fptn/server.crt \
-         | cut -d'=' -f2 | tr -d ':' | tr 'A-F' 'a-f' | xargs -I{} echo 'MD5 Fingerprint: {}'"
-}
-
-# =============================================================================
-# User management
-# =============================================================================
-
-# Silently remove a user if they already exist (non-interactive, with timeout)
-delete_user_if_exists() {
-    local username="$1"
-    echo "[*] Removing existing user (if present): ${username}"
-    run_with_timeout 10 \
-        bash -c "printf 'y\n' | \
-            (cd \"$(load_install_dir)\" && \
-             docker compose exec -i -T fptn-server fptn-passwd --del-user \"$username\") \
-            >/dev/null 2>&1" \
-    || true
-}
-
-# Interactive user deletion (passes a TTY through)
-del_user_interactive() {
-    local username="$1"
-    local dir; dir="$(load_install_dir)"
-    (cd "$dir" && docker compose exec -it fptn-server fptn-passwd --del-user "$username")
-}
-
-# Interactive user creation
-add_user_interactive() {
-    local username="$1" bw="$2"
-    local dir; dir="$(load_install_dir)"
-    (cd "$dir" && docker compose exec -it fptn-server \
-        fptn-passwd --add-user "$username" --bandwidth "$bw")
-}
-
-# =============================================================================
-# Token generation
-# =============================================================================
-
-# Raw token output (all stdout)
-generate_token_raw() {
-    local username="$1" password="$2" server_ip="$3" server_port="$4"
-    dc run --rm fptn-server token-generator \
-        --user "$username" --password "$password" \
-        --server-ip "$server_ip" --port "$server_port"
-}
-
-# Filtered token output — extracts lines starting with "fptn:"
-generate_token() {
-    local username="$1" password="$2" server_ip="$3" server_port="$4"
-    generate_token_raw "$username" "$password" "$server_ip" "$server_port" \
-        | awk '/^fptn:/ { print; found=1 } END { exit (found ? 0 : 1) }'
-}
-
-print_token_block() {
-    local token="$1"
-    echo
-    echo "================ TOKEN ================"
-    echo "$token"
-    echo "======================================="
-}
-
-# =============================================================================
-# Install flows
-# =============================================================================
-
-easy_install() {
-    ensure_docker_stack
-
-    local dir="$DEFAULT_INSTALL_DIR"
+    # Save config
     save_manager_config "$dir"
     mkdir -p "$dir"
 
-    echo "[*] Detecting public IP..."
-    local server_external_ips
-    server_external_ips="$(fetch_public_ip || true)"
-
+    # Write Docker Compose
     write_compose "$dir"
     write_env "$dir" \
-        "$DEFAULT_FPTN_PORT" \
-        "$server_external_ips" \
+        "$fptn_port" \
+        "$server_ip" \
         "$DEFAULT_PROXY_DOMAIN" \
         "$DEFAULT_ENABLE_DETECT_PROBING" \
         "$DEFAULT_DISABLE_BITTORRENT" \
@@ -410,345 +690,98 @@ easy_install() {
         "$DEFAULT_DNS_IPV6_PRIMARY" \
         "$DEFAULT_DNS_IPV6_SECONDARY"
 
-    if [[ -z "$server_external_ips" ]]; then
-        echo "[!] Warning: Could not auto-detect public IP." >&2
-        echo "    Edit SERVER_EXTERNAL_IPS in ${dir}/.env manually." >&2
+    # SSL & Start Container
+    msg_info "Generating SSL certs..."
+    mkdir -p "${dir}/fptn-server-data"
+    if [ ! -f "${dir}/fptn-server-data/server.key" ]; then
+        dc run --rm fptn-server sh -c "cd /etc/fptn && openssl genrsa -out server.key 2048" >/dev/null 2>&1
+        dc run --rm fptn-server sh -c "cd /etc/fptn && openssl req -new -x509 -key server.key -out server.crt -days 365 -subj '/CN=fptn'" >/dev/null 2>&1
     fi
 
-    echo "[*] Generating SSL certificates (if missing)..."
-    ssl_gen_if_missing
-
-    echo "[*] Starting server..."
+    msg_info "Starting VPN Server..."
     dc up -d
-
-    echo "[*] Waiting for fptn-server to be ready..."
     wait_for_container_ready
 
-    echo
-    ssl_fingerprint || true
-    echo
-    echo "[*] Server status:"
-    dc ps || true
+    # --- Bot Setup ---
+    echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}       TELEGRAM BOT CONFIGURATION      ${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════${NC}"
+    
+    echo -e "${CYAN}Talk to @BotFather on Telegram to create a bot and get the API Token.${NC}"
+    read -r -p "Enter Bot Token: " bot_token
+    
+    echo -e "${CYAN}Your Telegram User ID is required for admin access.${NC}"
+    echo -e "You can find it using @userinfobot."
+    read -r -p "Enter Admin Telegram ID: " admin_id
 
-    # --- Create easy user and generate token ---
-    local username server_ip server_port installed_port password token
-    username="$(easy_username)"
-    server_ip="$(fetch_public_ip || true)"
-    installed_port="$(env_get FPTN_PORT 2>/dev/null || true)"
-    server_port="${installed_port:-$DEFAULT_FPTN_PORT}"
-
-    echo
-    echo "[*] Creating easy VPN user (new each run): ${username}"
-    echo "[!] You will be prompted INSIDE the container to set a password for '${username}'."
-    echo
-
-    add_user_interactive "$username" "$DEFAULT_BANDWIDTH_MBPS"
-
-    echo
-    password="$(read_secret_tty "[*] Re-enter the SAME password to generate the access token: ")"
-    echo
-
-    [[ -z "${server_ip:-}" ]] && server_ip="YOUR_SERVER_PUBLIC_IP"
-
-    echo "[!] Easy user credentials (save these):"
-    echo "    Username : ${username}"
-    echo "    Password : ${password}"
-
-    token="$(generate_token "$username" "$password" "$server_ip" "$server_port" || true)"
-    if [[ -n "${token:-}" ]]; then
-        print_token_block "$token"
-    else
-        echo
-        echo "[!] Token generation failed. Raw generator output:"
-        generate_token_raw "$username" "$password" "$server_ip" "$server_port" || true
+    if [ -z "$bot_token" ] || [ -z "$admin_id" ]; then
+        msg_err "Bot Token and Admin ID are required!"
+        exit 1
     fi
 
+    install_bot_dependencies
+    write_bot_script "$bot_token" "$admin_id" "$dir" "$server_ip" "$fptn_port"
+    create_systemd_service
+
     echo
-    echo "[+] Easy install complete."
+    echo -e "${GREEN}╔═══════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║       INSTALLATION COMPLETE           ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════╝${NC}"
+    echo
+    echo -e "  VPN Server IP : ${YELLOW}$server_ip${NC}"
+    echo -e "  VPN Port      : ${YELLOW}$fptn_port${NC}"
+    echo -e "  Bot Service   : ${YELLOW}systemctl status fptn-bot${NC}"
+    echo
+    echo -e "  Open Telegram and start your bot! 🤖"
+    echo
 }
 
-custom_install() {
-    ensure_docker_stack
+# -------------------------
+# Self-install
+# -------------------------
+install_self() {
+  require_root
 
-    local dir fptn_port server_external_ips proxy_domain detect_probing
-    local disable_bt max_sessions dns4_1 dns4_2 dns6_1 dns6_2
-    local username password bw server_ip server_port token
+  if [ -e "$BIN_PATH" ] && [ "$(readlink -f "$0" 2>/dev/null || echo "$0")" = "$(readlink -f "$BIN_PATH" 2>/dev/null || echo "$BIN_PATH")" ]; then
+    return 0
+  fi
 
-    echo
-    echo "--- Custom Installation ---"
-    dir="$(prompt_default            "Install directory"                   "$DEFAULT_INSTALL_DIR")"
-    fptn_port="$(prompt_default      "FPTN_PORT (host port)"               "$DEFAULT_FPTN_PORT")"
-    server_external_ips="$(prompt_default \
-        "SERVER_EXTERNAL_IPS (comma-separated, optional)" \
-        "$(fetch_public_ip || true)")"
-    proxy_domain="$(prompt_default   "DEFAULT_PROXY_DOMAIN"                "$DEFAULT_PROXY_DOMAIN")"
-    detect_probing="$(prompt_default "ENABLE_DETECT_PROBING (true/false)"  "$DEFAULT_ENABLE_DETECT_PROBING")"
-    disable_bt="$(prompt_default     "DISABLE_BITTORRENT (true/false)"     "$DEFAULT_DISABLE_BITTORRENT")"
-    max_sessions="$(prompt_default   "MAX_ACTIVE_SESSIONS_PER_USER"        "$DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER")"
-    dns4_1="$(prompt_default         "DNS_IPV4_PRIMARY"                    "$DEFAULT_DNS_IPV4_PRIMARY")"
-    dns4_2="$(prompt_default         "DNS_IPV4_SECONDARY"                  "$DEFAULT_DNS_IPV4_SECONDARY")"
-    dns6_1="$(prompt_default         "DNS_IPV6_PRIMARY"                    "$DEFAULT_DNS_IPV6_PRIMARY")"
-    dns6_2="$(prompt_default         "DNS_IPV6_SECONDARY"                  "$DEFAULT_DNS_IPV6_SECONDARY")"
+  if [[ "${0##*/}" == "bash" || "${0##*/}" == "-bash" || "$0" == "-" ]]; then
+    cat <<EOF
+NOTE:
+You ran this via pipe (curl | bash), so it can't self-install reliably.
+Use this instead:
 
-    IFS= read -r -p "VPN Username: "  username
-    bw="$(prompt_default "Bandwidth (Mbps)" "$DEFAULT_BANDWIDTH_MBPS")"
-
-    save_manager_config "$dir"
-    mkdir -p "$dir"
-
-    write_compose "$dir"
-    write_env "$dir" \
-        "$fptn_port" \
-        "$server_external_ips" \
-        "$proxy_domain" \
-        "$detect_probing" \
-        "$disable_bt" \
-        "$max_sessions" \
-        "$dns4_1" \
-        "$dns4_2" \
-        "$dns6_1" \
-        "$dns6_2"
-
-    echo "[*] Generating SSL certificates (if missing)..."
-    ssl_gen_if_missing
-
-    echo "[*] Starting server..."
-    dc up -d
-
-    echo "[*] Waiting for fptn-server to be ready..."
-    wait_for_container_ready
-
-    echo
-    echo "[*] Creating VPN user: ${username}"
-    echo "[!] You will be prompted INSIDE the container to set a password."
-    echo
-
-    delete_user_if_exists "$username"
-    add_user_interactive "$username" "$bw"
-
-    echo
-    password="$(read_secret_tty "[*] Re-enter the SAME password to generate the access token: ")"
-    echo
-
-    server_ip="$(fetch_public_ip || true)"
-    server_port="${fptn_port:-$DEFAULT_FPTN_PORT}"
-    [[ -z "${server_ip:-}" ]] && server_ip="YOUR_SERVER_PUBLIC_IP"
-
-    token="$(generate_token "$username" "$password" "$server_ip" "$server_port" || true)"
-    if [[ -n "${token:-}" ]]; then
-        print_token_block "$token"
-    else
-        echo
-        echo "[!] Token generation failed. Raw generator output:"
-        generate_token_raw "$username" "$password" "$server_ip" "$server_port" || true
-    fi
-
-    echo
-    echo "[+] Custom install complete."
-}
-
-# =============================================================================
-# Service operations
-# =============================================================================
-
-service_start()  { need_install_dir; dc up -d;         echo "[+] Service started."; }
-service_stop()   { need_install_dir; dc down;          echo "[+] Service stopped."; }
-service_status() { need_install_dir; dc ps; }
-service_logs()   { need_install_dir; dc logs --tail=100 -f; }
-
-service_update() {
-    need_install_dir
-    echo "[*] Pulling latest FPTN image..."
-    dc pull
-    echo "[*] Restarting with new image..."
-    dc up -d
-    echo "[+] Update complete."
-}
-
-# =============================================================================
-# User/token operations (post-install menu options)
-# =============================================================================
-
-add_vpn_user() {
-    ensure_docker_stack
-    need_install_dir
-
-    local username bw server_ip server_port installed_port password token
-    IFS= read -r -p "VPN Username: " username
-    bw="$(prompt_default "Bandwidth (Mbps)" "$DEFAULT_BANDWIDTH_MBPS")"
-
-    echo "[*] Creating user: ${username}"
-    delete_user_if_exists "$username"
-    add_user_interactive "$username" "$bw"
-
-    echo
-    password="$(read_secret_tty "[*] Re-enter the SAME password to generate the access token: ")"
-    echo
-
-    server_ip="$(fetch_public_ip || true)"
-    installed_port="$(env_get FPTN_PORT 2>/dev/null || true)"
-    server_port="${installed_port:-$DEFAULT_FPTN_PORT}"
-    [[ -z "${server_ip:-}" ]] && server_ip="YOUR_SERVER_PUBLIC_IP"
-
-    token="$(generate_token "$username" "$password" "$server_ip" "$server_port" || true)"
-    if [[ -n "${token:-}" ]]; then
-        print_token_block "$token"
-    else
-        echo
-        echo "[!] Token generation failed. Raw generator output:"
-        generate_token_raw "$username" "$password" "$server_ip" "$server_port" || true
-    fi
-}
-
-gen_token_menu() {
-    ensure_docker_stack
-    need_install_dir
-
-    local username password server_ip server_port installed_port token
-    IFS= read -r -p "VPN Username: " username
-    password="$(read_secret_tty "Password: ")"
-    echo
-
-    server_ip="$(fetch_public_ip || true)"
-    installed_port="$(env_get FPTN_PORT 2>/dev/null || true)"
-    server_port="${installed_port:-$DEFAULT_FPTN_PORT}"
-    [[ -z "${server_ip:-}" ]] && server_ip="YOUR_SERVER_PUBLIC_IP"
-
-    echo "[*] Generating token for: ${username}"
-    token="$(generate_token "$username" "$password" "$server_ip" "$server_port" || true)"
-    if [[ -n "${token:-}" ]]; then
-        print_token_block "$token"
-    else
-        echo
-        echo "[!] Token generation failed. Raw generator output:"
-        generate_token_raw "$username" "$password" "$server_ip" "$server_port" || true
-    fi
-}
-
-delete_vpn_user() {
-    ensure_docker_stack
-    need_install_dir
-
-    local username
-    IFS= read -r -p "Username to delete: " username
-    del_user_interactive "$username"
-    echo "[+] Done."
-}
-
-# =============================================================================
-# Self-install / self-update
-# =============================================================================
-
-is_self_managed() {
-    [[ "$(readlink -f "$0" 2>/dev/null || echo "$0")" == \
-       "$(readlink -f "$BIN_PATH" 2>/dev/null || echo "$BIN_PATH")" ]]
-}
-
-self_install() {
-    # Skip when invoked via pipe (curl | bash)
-    if [[ "${0##*/}" == "bash" || "${0##*/}" == "-bash" || "$0" == "-" ]]; then
-        cat <<'EOF'
-[!] Pipe-install detected.
-    To install fptn-manager as a system command, save this script and run:
-
-    sudo bash fptn-manager.sh --install
+curl -fsSL ${RAW_INSTALL_URL} -o /tmp/${APP_NAME} && sudo bash /tmp/${APP_NAME}
 
 EOF
-        return 0
-    fi
+    exit 0
+  fi
 
-    require_root
+  if [ -f "$0" ]; then
+    install -m 0755 "$0" "$BIN_PATH"
+    echo "[*] Installed command: $BIN_PATH"
+    return 0
+  fi
 
-    if is_self_managed; then
-        echo "[*] fptn-manager is already installed at ${BIN_PATH}."
-        return 0
-    fi
-
-    echo "[*] Installing fptn-manager to ${BIN_PATH}..."
-    cp -f "$0" "$BIN_PATH"
-    chmod +x "$BIN_PATH"
-    echo "[+] Installed. Run: ${APP_NAME}"
+  echo "ERROR: Cannot locate script path for self-install." >&2
+  exit 1
 }
 
-self_update() {
-    require_root
-    echo "[*] Downloading latest fptn-manager..."
-    ensure_curl
-    curl -fsSL "$RAW_INSTALL_URL" -o "$BIN_PATH"
-    chmod +x "$BIN_PATH"
-    echo "[+] fptn-manager updated. Run: ${APP_NAME}"
-}
+# -------------------------
+# Main
+# -------------------------
+if [ "$1" == "uninstall" ]; then
+    msg_warn "Uninstalling..."
+    systemctl stop fptn-bot 2>/dev/null || true
+    systemctl disable fptn-bot 2>/dev/null || true
+    rm -rf "$BOT_DIR"
+    rm -f "$BOT_SERVICE"
+    rm -f "$BIN_PATH"
+    rm -rf "$(load_install_dir)"
+    msg_ok "Uninstalled."
+    exit 0
+fi
 
-# =============================================================================
-# Interactive menu
-# =============================================================================
-
-menu() {
-    while true; do
-        echo
-        echo "FPTN VPN Manager — ${APP_NAME}"
-        echo "================================="
-        echo "Install dir : $(load_install_dir)"
-        echo
-        echo "  1)  Easy install   (auto user + token)"
-        echo "  2)  Custom install (full configuration)"
-        echo "  3)  Start service"
-        echo "  4)  Stop service"
-        echo "  5)  Show status"
-        echo "  6)  View logs"
-        echo "  7)  Update (pull latest image)"
-        echo "  8)  SSL: generate certs (if missing)"
-        echo "  9)  SSL: show MD5 fingerprint"
-        echo "  10) Add VPN user (prints token)"
-        echo "  11) Generate token (existing user)"
-        echo "  12) Delete VPN user"
-        echo "  13) Self-install (add to PATH)"
-        echo "  14) Self-update  (download latest)"
-        echo "  0)  Exit"
-        echo
-        read -r -p "Select: " c
-        echo
-
-        case "$c" in
-            1)  easy_install       ;;
-            2)  custom_install     ;;
-            3)  service_start      ;;
-            4)  service_stop       ;;
-            5)  service_status     ;;
-            6)  service_logs       ;;
-            7)  service_update     ;;
-            8)  ssl_gen_if_missing ;;
-            9)  ssl_fingerprint    ;;
-            10) add_vpn_user       ;;
-            11) gen_token_menu     ;;
-            12) delete_vpn_user    ;;
-            13) self_install       ;;
-            14) self_update        ;;
-            0)  echo "Bye."; exit 0 ;;
-            *)  echo "Unknown option: ${c}" ;;
-        esac
-    done
-}
-
-# =============================================================================
-# Entry point
-# =============================================================================
-
-main() {
-    case "${1:-}" in
-        --install)      self_install   ;;
-        --update)       self_update    ;;
-        --easy-install) easy_install   ;;
-        --start)        service_start  ;;
-        --stop)         service_stop   ;;
-        --status)       service_status ;;
-        --logs)         service_logs   ;;
-        --add-user)     add_vpn_user   ;;
-        --gen-token)    gen_token_menu ;;
-        "")             menu           ;;
-        *)              echo "Usage: ${APP_NAME} [--install|--update|--easy-install|--start|--stop|--status|--logs|--add-user|--gen-token]" >&2
-                        exit 1 ;;
-    esac
-}
-
-main "$@"
+install_self
+do_install
